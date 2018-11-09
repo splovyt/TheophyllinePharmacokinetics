@@ -1,0 +1,182 @@
+---
+author: "Simon Plovyt"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r libraries}
+##load the libraries
+libraries <- c("tidyverse", "plotly", "pracma") # plotly for interactive plots and pracma for AUC calculation
+for (l in libraries) {
+  suppressPackageStartupMessages(library(l, character.only = TRUE))
+}
+```
+
+## Data 
+Start by loading the dataset Theoph. This is data relating to a pharmacokinetics experiment of the anti-asthmatic drug theophylline.  
+
+
+```{r DataLoad}
+data(Theoph)
+
+# dependent variable y = conc (theophylline concentration in the sample (mg/L), numeric)
+# independent variables = Subject (factor with 12 levels), Wt (kg, numeric), Dose (mg/kg), Time (hrs, numeric) 
+```
+
+We will introduce a hypothetical demographics dataset characterizing the subjects.
+
+```{r demographics}
+dm <- read.csv("dm.csv")
+
+## convert the SUBJECT to factor
+dm$SUBJECT <- as.factor(dm$SUBJECT)
+
+## clean up the SEX column
+dm$SEX <- recode(dm$SEX, Male = "M")
+dm$SEX <- recode(dm$SEX, Female = "F")
+
+## convert age
+# 636 years for subject 6 is unlikely; I assume this is months, because this assumption is in line with the other ages.
+dm$Age <- as.character(dm$Age)
+dm$Age[6] <- as.character(636/12)
+
+# match the other ages with a regex operation
+converted_age <- c()
+for (age in dm$Age){
+  m <- gregexpr('[0-9]+.?[0-9]',age)
+  if (grepl('year',tolower(age))){
+      converted_age <- c(converted_age, as.character(regmatches(age,m)))
+  }
+  else if (grepl('month',tolower(age))){
+      converted_age <- c(converted_age, as.character(as.numeric(regmatches(age,m))/12))
+  }
+  else if (grepl('weeks',tolower(age))){
+      converted_age <- c(converted_age, as.character(as.numeric(regmatches(age,m))/52))
+  } else {converted_age <- c(converted_age, as.character(age))}
+}
+dm$Age <- as.numeric(converted_age)
+colnames(dm) <- c('Subject', 'Sex', 'Age')
+
+## merge the two tables using a left-join
+theoph_data <- left_join(Theoph, dm, by = "Subject")
+theoph_data$Subject <- as.factor(theoph_data$Subject)
+theoph_data # data frame was manually verified; no NAs found and units & data types are correct
+```
+
+
+```{r summary}
+boxplot(Wt~Sex, data=theoph_data, main="Weight by gender", ylab = 'Weight (kg)')
+boxplot(Dose~Sex, data=theoph_data, main="Dose by gender", ylab = 'Dose (mg/kg)')
+boxplot(Age~Sex, data=theoph_data, main="Age by gender", ylab = 'Age (yrs)')
+boxplot(Time~Sex, data=theoph_data, main="Elapsed time by gender", ylab = 'Time (hrs)')
+
+## calculate summary statistics for both genders
+## we must partition the data first
+females <- split(theoph_data, theoph_data$Sex)$F
+males <- split(theoph_data, theoph_data$Sex)$M
+summary(females) # females
+summary(males) # males
+
+```
+A basic data summary grouped by gender shows that the weight distribution for men is centered around a lower value compared to women. Since the drug dose is essentially a function of weight (mg/kg), the dose is still related to the weight (normalized by weight). Although the unit of the dose is a function of weight, the effects of weight might manifest in another way. Caution is advised when dealing with potential confounder variables. 
+
+Moreover, the dose itself (mg/kg) is higher on average for men. 
+
+In regards to age, the minimum, maximum and mean ages for men is lower. However, the median age is higher.
+
+Finally, the distribution of elapsed time between the drug administration and the sampling is close to equal between genders, which is most likely desirable in good experimental design. 
+
+
+## Visualization
+
+```{r visualization}
+p = ggplot() + labs(title="Theophylline concentration over time", x ='elapsed time (hr)', y = 'theophylline (mg/L)') + geom_line(data=theoph_data, aes(x=Time, y=conc, group=Subject, color=Dose)) + scale_colour_gradient(low = 'yellow', high = 'darkgreen') + geom_point(data=theoph_data, aes(x=Time, y=conc, group=Subject, fill=Sex)) 
+ggplotly(p)
+```
+Sample theophylline concentration in mg/L on the y-axis and elapsed time (in hr) since the drug administration on the x-axis. 
+
+The above plot is interactive and should be used as such. A lighter, more yellow, color signifies a lower dose of theophylline at t=0, whereas a darker, more green, color signifies a higher dose at t=0. Higher drug administration doses seem to correlate positively with theophylline concentration in the sample. Additionally, the gender can be toggled in the legend for more clear visualization. Generally, concentration in males seems higher. In line with the preceding analysis, one must note that correlation does not imply causation and this observation must be treated with caution. 
+
+## Analysis
+
+```{r AUC}
+# the AUC per subject can be generated from the following function "AUCperSubject"
+# This function requires the pracma package, from which the trapezoidal integration
+# function is used (trapz)
+
+AUCperSubject <- function (subject){
+  s <- theoph_data[theoph_data$Subject == subject,]
+  return(trapz(x=s$Time,y=s$conc)) 
+}
+
+# We will now collapse the concentration and time into the AUC and compile a table with 1 row per subject
+Theoph_AUC <- theoph_data %>% group_by(Subject) %>% summarize(Wt = first(Wt), Dose = first(Dose), Age = first(Age), Sex = first(Sex))
+
+# Next, we will add the calculated AUC value per subject
+AUC_column = c()
+for (subj in Theoph_AUC$Subject){
+  AUC_column = c(AUC_column, AUCperSubject(as.character(subj)))
+}
+Theoph_AUC$AUC <- AUC_column
+Theoph_AUC
+```
+
+### 1. Overall summary statistics
+```{r AUC1}
+## Summary statistics for the AUC column
+summary(Theoph_AUC$AUC)
+std(Theoph_AUC$AUC)
+
+## 95 % confidence interval if we assume a normal distribution
+m <- mean(Theoph_AUC$AUC)
+error <- qt(0.975,df=length(Theoph_AUC$AUC)-1)*sd(Theoph_AUC$AUC)/sqrt(length(Theoph_AUC$AUC))
+print(paste('The 95% confidence interval is [', as.character(round(m-error)), ', ',as.character(round(m+error)),'] with the mean (=', m, ') as center.',sep=''))
+```
+The estimate for the AUC as a measure for the PK over both genders is 103.80, with a standard deviation of 23.64. A 95% confidence interval surrounds the mean and is equal to [89, 119].
+
+### 2. Summary statistics per gender
+```{r AUC2}
+## If we split per gender
+# males
+males_AUC <- split(x = Theoph_AUC, Theoph_AUC$Sex)$M
+summary(males_AUC$AUC)
+std(males_AUC$AUC)
+
+m <- mean(males_AUC$AUC)
+error <- qt(0.975,df=length(males_AUC$AUC)-1)*sd(males_AUC$AUC)/sqrt(length(males_AUC$AUC))
+print(paste('The 95% confidence interval is [', as.character(round(m-error)), ', ',as.character(round(m+error)),'] with the mean (=', m, ') as center.',sep=''))
+
+# females
+females_AUC <- split(x = Theoph_AUC, Theoph_AUC$Sex)$F
+summary(females_AUC$AUC)
+std(females_AUC$AUC)
+
+m <- mean(females_AUC$AUC)
+error <- qt(0.975,df=length(females_AUC$AUC)-1)*sd(females_AUC$AUC)/sqrt(length(females_AUC$AUC))
+print(paste('The 95% confidence interval is [', as.character(round(m-error)), ', ',as.character(round(m+error)),'] with the mean (=', m, ') as center.',sep=''))
+```
+The estimate for the AUC as a measure for the PK for both genders separately:
+
+**MEN**
+
+Mean = 121.10
+
+Std = 20.75
+
+CI = [99, 143]
+
+
+**WOMEN**
+
+Mean = 86.47
+
+Std = 8.82
+
+CI = [77, 96]
+
+
+In the above paragraphs, the AUC was calculated as the integral between the first and last measured time points for every subject. The calculation was made using a trapezoidal approach. 
+Next, the rows were collapsed for the dataframe to only hold one row per subject and the computed AUC was added. Furthermore, summary statistics were computed for both genders together and also for the genders individually. To calculate 95% intervals, a normal distribution was assumed. When calculating the statistics on the AUCs, we must mention that the results are very variable due to a small sample pool and that gender is just one of the many variables. Inference on the importance of the parameters is done ideally by fitting a suited model and investigating the coefficients. The latter can provide a better estimate of the general AUC and PK property of the drug. 
+
